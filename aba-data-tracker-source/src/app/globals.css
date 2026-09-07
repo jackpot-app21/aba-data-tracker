@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Pensato per l'uso su tablet durante la sessione: niente selezione testo
+   accidentale sui pulsanti, tap target ampi, niente zoom involontario. */
+html,
+body {
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  touch-action: manipulation;
+  user-select: none;
+}
+
+:focus-visible {
+  outline: 2px solid theme("colors.mint.500");
+  outline-offset: 2px;
+}
+
+/* Evita il menu nativo "copia/condividi" di iOS durante la pressione
+   prolungata usata per aprire il menu "Elimina" (vedi DeleteMenu.tsx). */
+.no-callout {
+  -webkit-touch-callout: none;
+}
