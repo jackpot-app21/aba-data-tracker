@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { buildChildReportPdf } from "@/lib/report-pdf";
 import DeleteMenu from "@/components/DeleteMenu";
+import CumulativeView from "@/components/CumulativeView";
 import type {
   NodeLevel,
   NodeSessionPoint,
@@ -25,6 +26,7 @@ export default function ReportView({
   const [toDate, setToDate] = useState("");
   const [exporting, setExporting] = useState(false);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
+  const [mode, setMode] = useState<"presa" | "cumulativo">("presa");
 
   // Un obiettivo/item/task eliminato (archiviato) da REGISTRA non deve piu'
   // comparire nemmeno qui, per nessun terapista: senza questo filtro
@@ -164,79 +166,124 @@ export default function ReportView({
     }
   }
 
-  if (loading) {
-    return (
-      <p className="text-center text-ink-faint">Caricamento andamento...</p>
-    );
-  }
-
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl bg-mint-100 px-4 py-3">
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs font-medium text-ink-soft">
-            Dal
-            <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="rounded-lg border border-line px-2 py-1 text-sm focus:border-mint-500 focus:outline-none"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium text-ink-soft">
-            Al
-            <input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              className="rounded-lg border border-line px-2 py-1 text-sm focus:border-mint-500 focus:outline-none"
-            />
-          </label>
-          {(fromDate || toDate) && (
-            <button
-              type="button"
-              onClick={() => {
-                setFromDate("");
-                setToDate("");
-              }}
-              className="text-xs text-ink-faint underline"
-            >
-              Azzera filtro
-            </button>
-          )}
+      <div className="flex justify-center">
+        <div className="inline-flex rounded-full border border-line bg-white p-0.5">
+          <ModeButton
+            label="Presa dati"
+            active={mode === "presa"}
+            onClick={() => setMode("presa")}
+          />
+          <ModeButton
+            label="Cumulativo"
+            active={mode === "cumulativo"}
+            onClick={() => setMode("cumulativo")}
+          />
         </div>
-
-        <button
-          type="button"
-          onClick={handleExportPdf}
-          disabled={exporting || summaries.length === 0}
-          className="font-display rounded-full bg-ink px-5 py-2 text-sm font-bold text-white transition active:scale-95 disabled:opacity-40"
-        >
-          {exporting ? "Generazione PDF..." : "Scarica PDF"}
-        </button>
       </div>
 
-      {error && <p className="text-center text-sm text-prompted">{error}</p>}
-
-      {summaries.length === 0 ? (
-        <p className="text-center text-ink-faint">
-          Nessun dato registrato per questo bambino nell&apos;intervallo
-          selezionato.
-        </p>
+      {mode === "cumulativo" ? (
+        <CumulativeView childId={childId} />
+      ) : loading ? (
+        <p className="text-center text-ink-faint">Caricamento andamento...</p>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {summaries.map((summary) => (
-            <DeleteMenu
-              key={`${summary.node_level}:${summary.node_id}`}
-              confirmLabel={`Eliminare "${summary.breadcrumb}" dall'andamento? Sparira' dai grafici e dalla selezione in Registra per tutti i terapisti.`}
-              onDelete={() => handleDeleteNode(summary.node_level, summary.node_id)}
+        <>
+          <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl bg-mint-100 px-4 py-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-xs font-medium text-ink-soft">
+                Dal
+                <input
+                  type="date"
+                  value={fromDate}
+                  onChange={(e) => setFromDate(e.target.value)}
+                  className="rounded-lg border border-line px-2 py-1 text-sm focus:border-mint-500 focus:outline-none"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-ink-soft">
+                Al
+                <input
+                  type="date"
+                  value={toDate}
+                  onChange={(e) => setToDate(e.target.value)}
+                  className="rounded-lg border border-line px-2 py-1 text-sm focus:border-mint-500 focus:outline-none"
+                />
+              </label>
+              {(fromDate || toDate) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFromDate("");
+                    setToDate("");
+                  }}
+                  className="text-xs text-ink-faint underline"
+                >
+                  Azzera filtro
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleExportPdf}
+              disabled={exporting || summaries.length === 0}
+              className="font-display rounded-full bg-ink px-5 py-2 text-sm font-bold text-white transition active:scale-95 disabled:opacity-40"
             >
-              <NodeCard summary={summary} />
-            </DeleteMenu>
-          ))}
-        </div>
+              {exporting ? "Generazione PDF..." : "Scarica PDF"}
+            </button>
+          </div>
+
+          {error && (
+            <p className="text-center text-sm text-prompted">{error}</p>
+          )}
+
+          {summaries.length === 0 ? (
+            <p className="text-center text-ink-faint">
+              Nessun dato registrato per questo bambino nell&apos;intervallo
+              selezionato.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {summaries.map((summary) => (
+                <DeleteMenu
+                  key={`${summary.node_level}:${summary.node_id}`}
+                  confirmLabel={`Eliminare "${summary.breadcrumb}" dall'andamento? Sparira' dai grafici e dalla selezione in Registra per tutti i terapisti.`}
+                  onDelete={() =>
+                    handleDeleteNode(summary.node_level, summary.node_id)
+                  }
+                >
+                  <NodeCard summary={summary} />
+                </DeleteMenu>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+function ModeButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+        active
+          ? "bg-mint-500 text-white"
+          : "text-ink-soft hover:text-ink"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 
