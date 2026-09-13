@@ -3,21 +3,18 @@ import Anthropic from "@anthropic-ai/sdk";
 export const runtime = "nodejs";
 
 // Endpoint server-side (Scenario B): riceve la foto del foglio cartaceo e
-// usa un modello con capacita' di visione per contare automaticamente le
-// stanghette S/P per ogni colonna/data. La chiave API resta solo qui lato
-// server, mai esposta al browser del tecnico ABA. Il risultato viene sempre
-// mostrato in app come bozza modificabile, mai salvato direttamente.
+// usa Claude (vision) per contare automaticamente le stanghette S/P per ogni
+// colonna/data. La chiave API resta solo qui lato server, mai esposta al
+// browser del tecnico ABA. Il risultato viene sempre mostrato in app come
+// bozza modificabile, mai salvato direttamente.
 //
-// Due provider disponibili, scelti con la variabile d'ambiente
-// TALLY_PROVIDER:
-// - "anthropic" (default se assente) -> Claude, via Claude Platform.
-// - "google"                          -> Gemini, via Google AI Studio.
-// Utile per testare gratuitamente con Google AI Studio (solo dati NON
-// clinici, vedi avviso mostrato in PhotoImport.tsx quando questo provider
-// e' attivo) prima di attivare Claude a pagamento: basta cambiare
-// TALLY_PROVIDER su Vercel e rifare il deploy, senza toccare il codice.
+// Questo endpoint e' il percorso usato in produzione (TALLY_PROVIDER assente
+// o "anthropic"). Il branch vision-locale usa invece una pipeline di
+// computer vision interamente client-side (nessuna chiamata a questo
+// endpoint): il provider "google" (Gemini via Google AI Studio, usato solo
+// per test gratuiti su dati non clinici) e' stato rimosso, non serve piu' ne'
+// in produzione ne' come alternativa di test.
 const ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
-const GOOGLE_MODEL = process.env.GOOGLE_MODEL || "gemini-3.8-flash";
 
 const SYSTEM_PROMPT = `Sei un assistente che legge fogli cartacei di raccolta dati ABA (Applied Behavior Analysis) fotografati da un tecnico.
 
@@ -102,59 +99,6 @@ const TALLY_TOOL: Anthropic.Tool = {
   },
 };
 
-// Stesso schema del tool Anthropic sopra, riscritto nel formato richiesto da
-// Gemini (sottoinsieme di OpenAPI 3.0: "type" in maiuscolo, "nullable" come
-// campo separato invece di un'unione di tipi per i valori opzionali).
-const GOOGLE_RESPONSE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    rows: {
-      type: "ARRAY",
-      description:
-        "Una voce per ogni colonna di data leggibile sul foglio, da sinistra a destra.",
-      items: {
-        type: "OBJECT",
-        properties: {
-          date_iso: {
-            type: "STRING",
-            nullable: true,
-            description:
-              "Data della colonna in formato ISO YYYY-MM-DD, solo se leggibile con certezza (anno incluso). Altrimenti null.",
-          },
-          date_label: {
-            type: "STRING",
-            description:
-              "Testo della data cosi' come scritto a mano sul foglio (es. '12/04'), usato quando date_iso e' null.",
-          },
-          correct_count: {
-            type: "INTEGER",
-            description:
-              "Numero totale di stanghette nella riga S (risposte spontanee).",
-          },
-          prompted_count: {
-            type: "INTEGER",
-            description:
-              "Numero totale di stanghette nella riga P (risposte promptate).",
-          },
-          uncertain: {
-            type: "BOOLEAN",
-            description:
-              "true se la lettura di questa colonna (data e/o conteggi) e' incerta.",
-          },
-        },
-        required: [
-          "date_iso",
-          "date_label",
-          "correct_count",
-          "prompted_count",
-          "uncertain",
-        ],
-      },
-    },
-  },
-  required: ["rows"],
-};
-
 async function extractWithAnthropic(
   apiKey: string,
   imageBase64: string,
@@ -213,79 +157,14 @@ async function extractWithAnthropic(
   return input.rows ?? [];
 }
 
-async function extractWithGoogle(
-  apiKey: string,
-  imageBase64: string,
-  mimeType: AllowedMimeType
-): Promise<ExtractedRow[]> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GOOGLE_MODEL}:generateContent?key=${apiKey}`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: `${SYSTEM_PROMPT}\n\n${EXTRACTION_INSTRUCTION}` },
-            { inline_data: { mime_type: mimeType, data: imageBase64 } },
-          ],
-        },
-      ],
-      generationConfig: {
-        response_mime_type: "application/json",
-        response_schema: GOOGLE_RESPONSE_SCHEMA,
-      },
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(
-      `Google AI Studio ha risposto con errore ${res.status}: ${errText.slice(0, 300)}`
-    );
-  }
-
-  const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
-
-  const text = data.candidates?.[0]?.content?.parts?.find(
-    (p) => typeof p.text === "string"
-  )?.text;
-
-  if (!text) {
-    throw new Error("Google AI Studio non ha restituito un risultato leggibile.");
-  }
-
-  let parsed: { rows?: ExtractedRow[] };
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error(
-      "Google AI Studio ha restituito una risposta non in formato JSON valido."
-    );
-  }
-
-  return parsed.rows ?? [];
-}
-
 export async function POST(req: Request) {
-  const provider = process.env.TALLY_PROVIDER === "google" ? "google" : "anthropic";
-
-  const apiKey =
-    provider === "google"
-      ? process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY
-      : process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
 
   if (!apiKey) {
     return Response.json(
       {
         error:
-          provider === "google"
-            ? "Lettura automatica non configurata (manca la chiave Google AI Studio sul server). Inserisci i dati manualmente."
-            : "Lettura automatica non configurata (manca la chiave API sul server). Inserisci i dati manualmente.",
+          "Lettura automatica non configurata (manca la chiave API sul server). Inserisci i dati manualmente.",
       },
       { status: 501 }
     );
@@ -313,10 +192,7 @@ export async function POST(req: Request) {
   const safeMimeType = mimeType as AllowedMimeType;
 
   try {
-    const rows =
-      provider === "google"
-        ? await extractWithGoogle(apiKey, imageBase64, safeMimeType)
-        : await extractWithAnthropic(apiKey, imageBase64, safeMimeType);
+    const rows = await extractWithAnthropic(apiKey, imageBase64, safeMimeType);
 
     return Response.json({ rows });
   } catch (err) {

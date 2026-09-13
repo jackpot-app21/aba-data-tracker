@@ -508,14 +508,6 @@ export default function PhotoImport({
         appena salvi i dati.
       </p>
 
-      {process.env.NEXT_PUBLIC_TALLY_PROVIDER === "google" && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
-          Lettura automatica in modalita' TEST (Google AI Studio, piano
-          gratuito): carica solo foto di prova con dati non reali, mai foto
-          di sessioni vere, finche' questa modalita' e' attiva.
-        </div>
-      )}
-
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
           Obiettivo
