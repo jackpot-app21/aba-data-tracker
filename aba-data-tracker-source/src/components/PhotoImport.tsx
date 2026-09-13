@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { supabase } from "@/lib/supabase/client";
 import AddInline from "@/components/AddInline";
 import DeleteMenu from "@/components/DeleteMenu";
@@ -10,51 +10,67 @@ import type {
   CatalogTask,
   NodeLevel,
 } from "@/lib/types";
+import {
+  currentMonthValue,
+  parseMonthValue,
+  weekRowsForMonth,
+} from "@/lib/monthly-grid";
 
-// Scenario B: foto del foglio cartaceo -> lettura automatica delle
-// stanghette via Claude (vision) -> bozza modificabile -> salvataggio.
-// La lettura automatica e' sempre una proposta: il tecnico ABA la rivede
-// e corregge prima di salvare, non viene mai salvata a occhi chiusi.
+// Foglio "mensile a date precompilate" (branch vision-locale): il foglio
+// cartaceo ha gia' le date stampate (Lun-Sab, tutto il mese), quindi qui non
+// serve piu' leggere/indovinare la data ne' a mano ne' via AI: la deduciamo
+// dalla posizione nella griglia una volta scelto il mese. Il tecnico guarda
+// la foto come riferimento e trascrive le stanghette S/P nella colonna
+// corrispondente al giorno della sessione. Le colonne senza sessione restano
+// vuote e NON vengono salvate come zero (vedi handleSave).
+//
+// La lettura automatica via AI/computer vision (che in futuro potra' leggere
+// direttamente stanghette e colonne dalla foto) non e' ancora ricollegata a
+// questa nuova griglia: la foto resta per ora solo un riferimento visivo
+// durante la trascrizione manuale. Verra' ricollegata quando la pipeline
+// (Fase 1/2, vedi note di progetto) sara' pronta e testata su foto reali.
 //
 // IMPORTANTE: la foto NON viene mai salvata su database o storage. Vive solo
-// in memoria nel browser (per la lettura automatica e l'anteprima durante la
-// revisione) e viene scartata appena si salvano i dati numerici. Questo evita
-// di accumulare spazio inutile e riduce al minimo i dati sensibili conservati
-// (sui fogli cartacei puo' comparire scrittura a mano riconducibile a persone).
-const MAX_IMAGE_EDGE = 1568; // limite consigliato per l'analisi vision
+// in memoria nel browser (come riferimento durante la trascrizione) e viene
+// scartata appena si salvano i dati numerici. Questo evita di accumulare
+// spazio inutile e riduce al minimo i dati sensibili conservati (sui fogli
+// cartacei puo' comparire scrittura a mano riconducibile a persone).
+const MAX_IMAGE_EDGE = 1568;
 const JPEG_QUALITY = 0.85;
 
 type PhotoRow = {
-  key: string;
+  key: string; // == date (YYYY-MM-DD)
   date: string;
-  dateLabel: string;
+  dayName: string;
+  dayLabel: string;
   correct: string;
   prompted: string;
-  uncertain: boolean;
 };
 
-type ExtractedRow = {
-  date_iso: string | null;
-  date_label: string;
-  correct_count: number;
-  prompted_count: number;
-  uncertain: boolean;
-};
-
-function newRow(): PhotoRow {
-  return {
-    key: crypto.randomUUID(),
-    date: "",
-    dateLabel: "",
-    correct: "",
-    prompted: "",
-    uncertain: false,
-  };
+function buildRowsForMonth(monthValue: string): PhotoRow[] {
+  const parsed = parseMonthValue(monthValue);
+  if (!parsed) return [];
+  const weeks = weekRowsForMonth(parsed.year, parsed.month);
+  const rows: PhotoRow[] = [];
+  for (const week of weeks) {
+    for (const day of week) {
+      if (!day.inMonth) continue;
+      rows.push({
+        key: day.date,
+        date: day.date,
+        dayName: day.dayName,
+        dayLabel: day.dayLabel,
+        correct: "",
+        prompted: "",
+      });
+    }
+  }
+  return rows;
 }
 
 async function resizeImage(
   file: File
-): Promise<{ blob: Blob; base64: string; mimeType: string }> {
+): Promise<{ blob: Blob; mimeType: string }> {
   const bitmap = await createImageBitmap(file);
   const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
   const width = Math.round(bitmap.width * scale);
@@ -76,17 +92,7 @@ async function resizeImage(
     );
   });
 
-  const base64 = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const result = reader.result as string;
-      resolve(result.split(",")[1] ?? "");
-    };
-    reader.onerror = () => reject(new Error("Lettura immagine fallita."));
-    reader.readAsDataURL(blob);
-  });
-
-  return { blob, base64, mimeType };
+  return { blob, mimeType };
 }
 
 export default function PhotoImport({
@@ -108,15 +114,25 @@ export default function PhotoImport({
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoMimeType, setPhotoMimeType] = useState<string | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
-  const [rows, setRows] = useState<PhotoRow[]>([newRow()]);
+  const [monthValue, setMonthValue] = useState<string>(() => currentMonthValue());
+  const [rows, setRows] = useState<PhotoRow[]>(() => buildRowsForMonth(currentMonthValue()));
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
-  const [extracting, setExtracting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [successCount, setSuccessCount] = useState<number | null>(null);
+
+  const weekRows = useMemo(() => {
+    const parsed = parseMonthValue(monthValue);
+    if (!parsed) return [];
+    return weekRowsForMonth(parsed.year, parsed.month);
+  }, [monthValue]);
+
+  useEffect(() => {
+    setRows(buildRowsForMonth(monthValue));
+    setSuccessCount(null);
+  }, [monthValue]);
 
   useEffect(() => {
     if (!supabase) return;
@@ -321,59 +337,9 @@ export default function PhotoImport({
     if (taskId === id) setTaskId(null);
   }
 
-  async function runExtraction(base64: string, mimeType: string) {
-    setExtracting(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await fetch("/api/extract-tally", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: base64, mimeType }),
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(
-          data.error ?? "Lettura automatica non riuscita. Inserisci i dati manualmente."
-        );
-        return;
-      }
-
-      const extracted = (data.rows ?? []) as ExtractedRow[];
-      if (extracted.length === 0) {
-        setNotice(
-          "Non ho trovato colonne leggibili nella foto. Inserisci i dati manualmente qui sotto."
-        );
-        return;
-      }
-
-      setRows(
-        extracted.map((r) => ({
-          key: crypto.randomUUID(),
-          date: r.date_iso ?? "",
-          dateLabel: r.date_label ?? "",
-          correct: String(r.correct_count ?? 0),
-          prompted: String(r.prompted_count ?? 0),
-          uncertain: Boolean(r.uncertain) || !r.date_iso,
-        }))
-      );
-      setNotice(
-        "Lettura automatica completata: controlla e correggi date/conteggi prima di salvare, in particolare le righe evidenziate."
-      );
-    } catch {
-      setError(
-        "Lettura automatica non riuscita (errore di rete). Inserisci i dati manualmente."
-      );
-    } finally {
-      setExtracting(false);
-    }
-  }
-
   async function handlePhotoChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null;
     setSuccessCount(null);
-    setNotice(null);
     setError(null);
 
     if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
@@ -384,11 +350,10 @@ export default function PhotoImport({
     if (!file) return;
 
     try {
-      const { blob, base64, mimeType } = await resizeImage(file);
+      const { blob, mimeType } = await resizeImage(file);
       setPhotoBlob(blob);
       setPhotoMimeType(mimeType);
       setPhotoPreviewUrl(URL.createObjectURL(blob));
-      await runExtraction(base64, mimeType);
     } catch (err) {
       setError(
         err instanceof Error
@@ -400,25 +365,23 @@ export default function PhotoImport({
 
   function updateRow(key: string, patch: Partial<PhotoRow>) {
     setSuccessCount(null);
-    setRows((prev) =>
-      prev.map((r) => (r.key === key ? { ...r, ...patch, uncertain: false } : r))
-    );
-  }
-
-  function addRow() {
-    setRows((prev) => [...prev, newRow()]);
-  }
-
-  function removeRow(key: string) {
-    setRows((prev) => (prev.length > 1 ? prev.filter((r) => r.key !== key) : prev));
+    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
   }
 
   async function handleSave() {
     if (!supabase || !activeNodeId || !activeLevel || !photoBlob || !photoMimeType) return;
 
-    const validRows = rows.filter((r) => r.date);
+    // Le colonne che il terapista non ha toccato (nessuna sessione quel
+    // giorno) restano fuori dal salvataggio: non vanno mai lette come 0.
+    // Solo le colonne dove S e/o P sono stati compilati diventano una
+    // sessione salvata.
+    const validRows = rows.filter(
+      (r) => r.correct.trim() !== "" || r.prompted.trim() !== ""
+    );
     if (validRows.length === 0) {
-      setError("Aggiungi almeno una data con i conteggi (verifica le date evidenziate).");
+      setError(
+        "Compila i conteggi S/P di almeno un giorno prima di salvare."
+      );
       return;
     }
 
@@ -486,8 +449,7 @@ export default function PhotoImport({
 
       setSuccessCount(savedCount);
       if (savedCount > 0) {
-        setRows([newRow()]);
-        setNotice(null);
+        setRows(buildRowsForMonth(monthValue));
         if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
         setPhotoBlob(null);
         setPhotoMimeType(null);
@@ -501,10 +463,11 @@ export default function PhotoImport({
   return (
     <div className="flex flex-col gap-6">
       <p className="text-sm text-ink-soft">
-        Carica la foto del foglio cartaceo: i conteggi S/P per ogni data
-        vengono letti automaticamente e proposti come bozza, da controllare e
-        correggere prima di salvare. La foto non viene salvata da nessuna
-        parte: resta solo sul dispositivo durante la revisione e sparisce
+        Scegli il mese, poi trascrivi nella griglia qui sotto i conteggi S/P
+        di ogni giorno in cui si è svolta una sessione, usando la foto del
+        foglio cartaceo come riferimento. I giorni senza sessione restano
+        vuoti: non contano come zero. La foto non viene salvata da nessuna
+        parte: resta solo sul dispositivo durante la trascrizione e sparisce
         appena salvi i dati.
       </p>
 
@@ -586,7 +549,23 @@ export default function PhotoImport({
 
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
-          Foto del foglio
+          Mese
+        </h2>
+        <input
+          type="month"
+          value={monthValue}
+          onChange={(e) => setMonthValue(e.target.value)}
+          className="w-fit rounded-lg border border-line px-3 py-2 text-sm focus:border-mint-500 focus:outline-none"
+        />
+        <p className="text-xs text-ink-faint">
+          Deve corrispondere al mese stampato sul foglio cartaceo che stai
+          trascrivendo.
+        </p>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+          Foto del foglio (riferimento)
         </h2>
         <div className="flex flex-wrap gap-2">
           {/* Due input distinti: "capture" forza la fotocamera su molti
@@ -632,106 +611,76 @@ export default function PhotoImport({
             className="max-h-96 w-auto rounded-lg border border-line object-contain"
           />
         )}
-        {extracting && (
-          <p className="text-sm text-ink-soft">Lettura automatica in corso...</p>
-        )}
       </section>
 
-      <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
-            Conteggi per data
-          </h2>
-          {photoBlob && photoMimeType && !extracting && (
-            <button
-              type="button"
-              onClick={async () => {
-                const base64 = await new Promise<string>((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onloadend = () => {
-                    const result = reader.result as string;
-                    resolve(result.split(",")[1] ?? "");
-                  };
-                  reader.onerror = () => reject(new Error("Lettura immagine fallita."));
-                  reader.readAsDataURL(photoBlob);
-                });
-                runExtraction(base64, photoMimeType);
-              }}
-              className="text-xs text-ink-faint underline hover:text-ink-soft"
-            >
-              Rileggi foto
-            </button>
-          )}
-        </div>
-
-        {notice && <p className="text-xs text-amber-600">{notice}</p>}
+      <section className="flex flex-col gap-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+          Conteggi per data
+        </h2>
 
         <div className="flex flex-col gap-2">
-          {rows.map((row) => (
-            <div
-              key={row.key}
-              className={`flex flex-wrap items-center gap-2 rounded-lg p-2 ${
-                row.uncertain ? "bg-amber-100" : "bg-mint-100"
-              }`}
-            >
-              <div className="flex flex-col gap-0.5">
-                <input
-                  type="date"
-                  value={row.date}
-                  onChange={(e) => updateRow(row.key, { date: e.target.value })}
-                  className="rounded-lg border border-line px-2 py-1 text-sm focus:border-mint-500 focus:outline-none"
-                />
-                {!row.date && row.dateLabel && (
-                  <span className="text-[10px] text-amber-700">
-                    scritto: &quot;{row.dateLabel}&quot; &mdash; verifica e completa
-                  </span>
-                )}
-              </div>
-              <label className="flex items-center gap-1 text-xs text-ink-soft">
-                S
-                <input
-                  type="number"
-                  min={0}
-                  inputMode="numeric"
-                  value={row.correct}
-                  onChange={(e) => updateRow(row.key, { correct: e.target.value })}
-                  className="w-16 rounded-lg border border-line px-2 py-1 text-sm text-correct focus:border-mint-500 focus:outline-none"
-                />
-              </label>
-              <label className="flex items-center gap-1 text-xs text-ink-soft">
-                P
-                <input
-                  type="number"
-                  min={0}
-                  inputMode="numeric"
-                  value={row.prompted}
-                  onChange={(e) => updateRow(row.key, { prompted: e.target.value })}
-                  className="w-16 rounded-lg border border-line px-2 py-1 text-sm text-prompted focus:border-mint-500 focus:outline-none"
-                />
-              </label>
-              {row.uncertain && (
-                <span className="text-[10px] font-semibold uppercase text-amber-700">
-                  Verifica
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => removeRow(row.key)}
-                disabled={rows.length === 1}
-                className="ml-auto text-xs text-ink-faint underline disabled:opacity-30"
-              >
-                Rimuovi
-              </button>
+          {weekRows.map((week, wi) => (
+            <div key={wi} className="grid grid-cols-6 gap-1.5">
+              {week.map((day) => {
+                if (!day.inMonth) {
+                  return (
+                    <div
+                      key={day.date}
+                      className="rounded-md bg-line/20"
+                      aria-hidden
+                    />
+                  );
+                }
+                const row = rows.find((r) => r.date === day.date);
+                if (!row) return <div key={day.date} />;
+                const touched =
+                  row.correct.trim() !== "" || row.prompted.trim() !== "";
+                return (
+                  <div
+                    key={day.date}
+                    className={`flex flex-col items-center gap-1 rounded-md p-1.5 ${
+                      touched ? "bg-mint-100" : "bg-line/10"
+                    }`}
+                  >
+                    <span className="text-[10px] font-semibold text-ink-soft">
+                      {day.dayName} {day.dayLabel}
+                    </span>
+                    <label className="flex items-center gap-1 text-[10px] text-ink-soft">
+                      S
+                      <input
+                        type="number"
+                        min={0}
+                        inputMode="numeric"
+                        value={row.correct}
+                        onChange={(e) =>
+                          updateRow(row.key, { correct: e.target.value })
+                        }
+                        className="w-10 rounded border border-line px-1 py-0.5 text-xs text-correct focus:border-mint-500 focus:outline-none"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-[10px] text-ink-soft">
+                      P
+                      <input
+                        type="number"
+                        min={0}
+                        inputMode="numeric"
+                        value={row.prompted}
+                        onChange={(e) =>
+                          updateRow(row.key, { prompted: e.target.value })
+                        }
+                        className="w-10 rounded border border-line px-1 py-0.5 text-xs text-prompted focus:border-mint-500 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                );
+              })}
             </div>
           ))}
-          <button
-            type="button"
-            onClick={addRow}
-            className="w-fit rounded-full border border-dashed border-line px-4 py-2 text-sm font-medium text-ink-faint hover:border-mint-200 hover:text-ink-soft"
-          >
-            + Aggiungi data
-          </button>
         </div>
+        <p className="text-xs text-ink-faint">
+          I giorni evidenziati hanno almeno un conteggio inserito. Quelli
+          bianchi restano vuoti e non verranno salvati.
+        </p>
       </section>
 
       {error && <p className="text-center text-sm text-prompted">{error}</p>}
@@ -746,7 +695,7 @@ export default function PhotoImport({
       <button
         type="button"
         onClick={handleSave}
-        disabled={saving || extracting || !activeNodeId || !photoBlob}
+        disabled={saving || !activeNodeId || !photoBlob}
         className="font-display mx-auto flex items-center gap-2 rounded-full bg-ink px-8 py-3 text-base font-bold text-white shadow-md transition active:scale-95 disabled:opacity-50"
       >
         {saving ? "Salvataggio..." : "Salva dati dalla foto"}
