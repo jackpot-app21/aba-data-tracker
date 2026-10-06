@@ -14,7 +14,11 @@ export const runtime = "nodejs";
 // endpoint): il provider "google" (Gemini via Google AI Studio, usato solo
 // per test gratuiti su dati non clinici) e' stato rimosso, non serve piu' ne'
 // in produzione ne' come alternativa di test.
-const ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
+// Sonnet legge i dettagli fini (colonne strette, stanghette ravvicinate o
+// scritte in corsivo) in modo piu' affidabile di Haiku. La differenza di
+// costo per foto e' minima (un'unica immagine compressa per chiamata, pochi
+// millesimi di dollaro), quindi conviene usarlo qui.
+const ANTHROPIC_MODEL = "claude-sonnet-5-5";
 
 const SYSTEM_PROMPT = `Sei un assistente che legge fogli cartacei mensili di raccolta dati ABA (Applied Behavior Analysis) fotografati da un tecnico.
 
@@ -24,13 +28,15 @@ Il foglio ha questa struttura:
 - 5 blocchi settimanali impilati, ciascuno con 6 colonne di giorno (Lun-Sab) con la DATA GIA' STAMPATA sopra ogni colonna (es. "Lun 05/10"). Alcune colonne, quelle di giorni fuori dal mese, hanno sfondo grigio: IGNORALE sempre, anche se contengono segni.
 - Ogni blocco ha 2 righe di dati sotto la data: "S" (risposte spontanee) e "P" (risposte promptate). Non esiste una riga "%".
 - IMPORTANTE - notazione dei conteggi: ogni stanghetta verticale ( | ) rappresenta UNA risposta. Per il numero 5 sono VALIDE entrambe le notazioni, anche miste nello stesso foglio: (a) 5 stanghette verticali singole una accanto all'altra, oppure (b) il tally tradizionale a 4 stanghette verticali + 1 barra orizzontale/diagonale che le attraversa tutte e 4 (quel gruppo vale 5). Riconosci entrambe le forme. Un gruppo di 4 stanghette SENZA barra vale 4, non 5. Un gruppo incompleto (es. 3 stanghette singole) vale il numero di stanghette visibili. Conta sempre il totale corretto di risposte in ciascuna cella, sommando eventuali piu' gruppi da 5 (in qualunque delle due notazioni) piu' i segni sciolti.
-- Una colonna (giorno) senza alcun segno in S e P significa che quel giorno NON c'e' stata sessione: NON e' uno zero, va semplicemente OMESSA dal risultato (non includerla tra le rows).
+- Una colonna (giorno) senza alcun segno in S e P significa che quel giorno NON c'e' stata sessione: NON e' uno zero. Questa regola e' VINCOLANTE: se non vedi inchiostro vero (nemmeno un tratto dubbio) in NESSUNA delle due righe di quella colonna, quella colonna NON VA MAI inclusa nel risultato, nemmeno con conteggio 0, nemmeno segnalata come incerta. Includi una colonna SOLO se c'e' inchiostro reale in almeno una delle due righe.
+
+- IMPORTANTE - assegnazione colonna: ogni blocco settimanale ha linee verticali nere stampate che separano una colonna di giorno dall'altra. Prima di assegnare un segno a una colonna, verifica che il segno si trovi per intero nello spazio bianco tra le due linee verticali di quella colonna, non in quella immediatamente a sinistra o a destra: i segni scritti a mano spesso pendono o sconfinano leggermente verso la colonna vicina, e lo spazio tra colonne e' stretto, quindi e' facile attribuire un gruppo di stanghette alla data sbagliata. Controlla colonna per colonna, da sinistra a destra, che il numero di colonne con segni e le rispettive date stampate sopra corrispondano esattamente a quello che vedi, prima di finalizzare la risposta.
 
 Il tuo compito: per OGNI colonna di giorno che appartiene al mese (sfondo bianco) E che ha almeno un segno in S o in P, conta con la massima precisione possibile il numero di stanghette nella riga S e nella riga P, e riporta la data esatta gia' stampata sopra quella colonna (non c'e' bisogno di leggere una data scritta a mano: usa quella stampata).
 
 Per la data: restituisci sempre date_iso in formato YYYY-MM-DD, leggendo il numero del mese e il "Mese AAAA" scritto nel titolo del foglio (es. "Ottobre 2026") insieme al giorno stampato sopra la colonna. Se per qualche motivo il titolo con mese/anno non è leggibile, lascia date_iso a null e riporta in date_label il testo del giorno cosi' come stampato (es. "Lun 05/10").
 
-Segnala uncertain=true per qualsiasi colonna in cui i segni sono sbavati, sovrapposti, poco leggibili, o ambigui nel conteggio. E' MEGLIO segnalare incertezza che indovinare: chi userà questi dati li rivedra' sempre a mano prima di salvarli.
+Segnala uncertain=true per qualsiasi colonna in cui i segni sono sbavati, sovrapposti, poco leggibili, scritti in corsivo/collegati tra loro senza spazi netti, o ambigui nel conteggio o nell'assegnazione alla colonna giusta. E' MEGLIO segnalare incertezza che indovinare: chi userà questi dati li rivedra' sempre a mano prima di salvarli.
 
 Rispondi SOLO usando lo strumento extract_tally_rows, con una voce per ogni colonna di giorno compilata (con segni), da sinistra a destra, saltando le colonne vuote o fuori mese.`;
 

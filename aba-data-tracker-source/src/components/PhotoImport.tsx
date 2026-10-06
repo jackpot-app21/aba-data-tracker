@@ -436,11 +436,20 @@ export default function PhotoImport({
             unmatched += 1;
             continue;
           }
+          const correctCount = er.correct_count ?? 0;
+          const promptedCount = er.prompted_count ?? 0;
+          // Rete di sicurezza: una colonna senza sessione non e' mai "0/0",
+          // il prompt lo vieta esplicitamente, ma se il modello la include
+          // comunque per errore NON dobbiamo precompilarla. Altrimenti
+          // apparirebbe come un giorno "toccato" e rischierebbe di essere
+          // salvata come sessione reale da 0 risposte se il tecnico non se
+          // ne accorge prima di salvare (viola la regola "vuoto != zero").
+          if (correctCount === 0 && promptedCount === 0) continue;
           matched += 1;
           byDate.set(er.date_iso, {
             ...byDate.get(er.date_iso)!,
-            correct: String(er.correct_count ?? 0),
-            prompted: String(er.prompted_count ?? 0),
+            correct: String(correctCount),
+            prompted: String(promptedCount),
             uncertain: Boolean(er.uncertain),
             autoFilled: true,
           });
