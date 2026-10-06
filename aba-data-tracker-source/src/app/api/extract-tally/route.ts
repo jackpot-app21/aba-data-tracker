@@ -135,7 +135,12 @@ async function extractWithAnthropic(
     // {type:"between_tools"}, che comunque non fa "pensare" il modello
     // prima di rispondere, solo (se necessario) tra una chiamata di
     // strumento e l'altra.
-    thinking: { type: "between_tools" },
+    // "as any": la versione di @anthropic-ai/sdk installata ha ancora i tipi
+    // TypeScript vecchi (conoscono solo "enabled"/"disabled"/"adaptive") e
+    // non sa ancora di "between_tools", anche se l'API lo accetta davvero
+    // (e lo richiede, per questo modello). Il cast serve solo a passare il
+    // controllo tipi in fase di build; il valore inviato all'API e' giusto.
+    thinking: { type: "between_tools" } as any,
     system: SYSTEM_PROMPT,
     tools: [TALLY_TOOL],
     // IMPORTANTE: a differenza di Haiku 4.5/Opus 5.5, Sonnet 5.5 non
