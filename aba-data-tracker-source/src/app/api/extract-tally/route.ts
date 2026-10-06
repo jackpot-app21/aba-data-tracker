@@ -39,7 +39,7 @@ Per la data: restituisci sempre date_iso in formato YYYY-MM-DD, leggendo il nume
 
 Segnala uncertain=true per qualsiasi colonna in cui i segni sono sbavati, sovrapposti, poco leggibili, scritti in corsivo/collegati tra loro senza spazi netti, o ambigui nel conteggio o nell'assegnazione alla colonna giusta. E' MEGLIO segnalare incertezza che indovinare: chi userà questi dati li rivedra' sempre a mano prima di salvarli.
 
-Rispondi SOLO usando lo strumento extract_tally_rows, con una voce per ogni colonna di giorno compilata (con segni), da sinistra a destra, saltando le colonne vuote o fuori mese.`;
+Rispondi SEMPRE chiamando lo strumento extract_tally_rows (mai con solo testo libero), con una voce per ogni colonna di giorno compilata (con segni), da sinistra a destra, saltando le colonne vuote o fuori mese. Se non trovi alcun segno utilizzabile su tutto il foglio, chiama comunque lo strumento con rows: [].`;
 
 const EXTRACTION_INSTRUCTION =
   "Leggi questo foglio cartaceo ed estrai i conteggi S/P per ogni colonna/data.";
@@ -130,15 +130,23 @@ async function extractWithAnthropic(
   const message = await anthropic.messages.create({
     model: ANTHROPIC_MODEL,
     max_tokens: 2048,
-    // Sonnet 5.5 ha il "thinking" adattivo attivo di default, incompatibile
-    // con un tool_choice forzato (type: "tool"): senza disabilitarlo qui,
-    // la chiamata fallisce con l'errore "tool_choice: type 'tool' ... are
-    // not supported for this model". Lo disabilitiamo esplicitamente: qui
-    // serve solo l'estrazione strutturata, non un ragionamento libero.
-    thinking: { type: "disabled" },
+    // Su questo modello il "thinking" non si spegne con {type:"disabled"}
+    // (l'API lo rifiuta: "send between_tools instead") - va usato
+    // {type:"between_tools"}, che comunque non fa "pensare" il modello
+    // prima di rispondere, solo (se necessario) tra una chiamata di
+    // strumento e l'altra.
+    thinking: { type: "between_tools" },
     system: SYSTEM_PROMPT,
     tools: [TALLY_TOOL],
-    tool_choice: { type: "tool", name: "extract_tally_rows" },
+    // IMPORTANTE: a differenza di Haiku 4.5/Opus 5.5, Sonnet 5.5 non
+    // supporta il tool_choice forzato (type "tool" o "any") - va usato
+    // "auto" e il prompt di sistema deve istruire esplicitamente il modello
+    // a chiamare sempre lo strumento (vedi fondo SYSTEM_PROMPT). Con "auto"
+    // esiste in teoria la possibilita' che il modello risponda con solo
+    // testo invece di chiamare lo strumento: in quel caso toolUse sotto
+    // risulta undefined e la funzione lancia un errore gestito (l'utente
+    // vede un messaggio e puo' comunque compilare a mano).
+    tool_choice: { type: "auto" },
     messages: [
       {
         role: "user",
