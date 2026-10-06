@@ -130,6 +130,12 @@ async function extractWithAnthropic(
   const message = await anthropic.messages.create({
     model: ANTHROPIC_MODEL,
     max_tokens: 2048,
+    // Sonnet 5.5 ha il "thinking" adattivo attivo di default, incompatibile
+    // con un tool_choice forzato (type: "tool"): senza disabilitarlo qui,
+    // la chiamata fallisce con l'errore "tool_choice: type 'tool' ... are
+    // not supported for this model". Lo disabilitiamo esplicitamente: qui
+    // serve solo l'estrazione strutturata, non un ragionamento libero.
+    thinking: { type: "disabled" },
     system: SYSTEM_PROMPT,
     tools: [TALLY_TOOL],
     tool_choice: { type: "tool", name: "extract_tally_rows" },
