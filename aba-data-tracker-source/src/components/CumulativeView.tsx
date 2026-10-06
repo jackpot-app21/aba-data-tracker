@@ -8,16 +8,17 @@ import { supabase } from "@/lib/supabase/client";
 // (item senza task, oppure task) sono state ACQUISITE nel tempo e mostra la
 // curva cumulativa delle acquisizioni.
 //
-// Regola di acquisizione (concordata):
-// - Una foglia e' ACQUISITA quando il bambino risponde in modo 100%
-//   spontaneo per 3 sessioni REGISTRATE consecutive.
-// - "100% spontaneo" = nessuna risposta promptata (P = 0) e almeno 3
-//   occasioni nella sessione (S >= 3).
+// Regola di acquisizione (concordata, aggiornata):
+// - Una foglia e' ACQUISITA quando il bambino risponde in modo >=90%
+//   spontaneo (S / (S+P) >= 90%) per 3 sessioni REGISTRATE consecutive.
+// - Non c'e' un numero minimo di occasioni richiesto nella sessione: basta
+//   anche una sola occasione (S+P >= 1), purche' la percentuale di
+//   spontaneo in quella sessione sia >= 90%.
 // - La data di acquisizione e' la data della terza sessione della serie.
 // - Una sessione che non rispetta la regola, prima dell'acquisizione,
 //   azzera la serie. Una volta acquisita, la foglia resta acquisita.
 // - I dati provengono da tutte le sessioni registrate (manuali o da foto).
-const MIN_OCCASIONI = 3;
+const SOGLIA_SPONTANEO = 0.9;
 const STREAK_RICHIESTA = 3;
 const GIORNI_SETTIMANA = 7;
 
@@ -88,7 +89,8 @@ function computeTarget(
   let streak = 0;
   let acquired: string | null = null;
   for (const s of sorted) {
-    const qualifies = s.prompted === 0 && s.correct >= MIN_OCCASIONI;
+    const occasioni = s.correct + s.prompted;
+    const qualifies = occasioni >= 1 && s.correct / occasioni >= SOGLIA_SPONTANEO;
     if (qualifies) {
       streak += 1;
       if (streak >= STREAK_RICHIESTA) {
@@ -296,10 +298,11 @@ export default function CumulativeView({ childId }: { childId: string }) {
         <p className="mt-1">
           Un item/task e&apos;{" "}
           <span className="font-semibold text-correct">acquisito</span> quando
-          il bambino risponde in modo 100% spontaneo (nessuna promptata, almeno
-          3 occasioni) per 3 sessioni registrate di fila. Ogni acquisizione
-          aggiunge 1 al conteggio; l&apos;asse delle date avanza di una settimana
-          per volta dall&apos;inizio del lavoro sull&apos;obiettivo.
+          il bambino risponde in modo spontaneo almeno il 90% delle volte
+          (senza un numero minimo di occasioni: basta anche una sola) per 3
+          sessioni registrate di fila. Ogni acquisizione aggiunge 1 al
+          conteggio; l&apos;asse delle date avanza di una settimana per volta
+          dall&apos;inizio del lavoro sull&apos;obiettivo.
         </p>
       </div>
 

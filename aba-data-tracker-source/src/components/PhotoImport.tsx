@@ -830,6 +830,12 @@ export default function PhotoImport({
         </p>
       </section>
 
+      <p className="rounded-lg bg-amber-50 px-3 py-2 text-center text-xs font-medium text-amber-800 ring-1 ring-amber-200">
+        ⚠ La lettura automatica puo' sbagliare: prima di salvare, ricontrolla
+        SEMPRE ogni valore con il foglio cartaceo (non solo le celle gialle)
+        e correggi eventuali errori a mano.
+      </p>
+
       {error && <p className="text-center text-sm text-prompted">{error}</p>}
       {successCount !== null && successCount > 0 && (
         <p className="text-center text-sm text-mint-600">
