@@ -16,24 +16,26 @@ import {
   weekRowsForMonth,
 } from "@/lib/monthly-grid";
 
-// Foglio "mensile a date precompilate" (branch vision-locale): il foglio
-// cartaceo ha gia' le date stampate (Lun-Sab, tutto il mese), quindi qui non
-// serve piu' leggere/indovinare la data ne' a mano ne' via AI: la deduciamo
-// dalla posizione nella griglia una volta scelto il mese. Il tecnico guarda
-// la foto come riferimento e trascrive le stanghette S/P nella colonna
-// corrispondente al giorno della sessione. Le colonne senza sessione restano
-// vuote e NON vengono salvate come zero (vedi handleSave).
+// Foglio "mensile a date precompilate" (branch vision-locale, ambiente di
+// test): il foglio cartaceo ha gia' le date stampate (Lun-Sab, tutto il
+// mese), quindi la data non va piu' letta/indovinata ne' a mano ne' via AI:
+// la deduciamo dalla posizione nella griglia una volta scelto il mese.
 //
-// La lettura automatica via AI/computer vision (che in futuro potra' leggere
-// direttamente stanghette e colonne dalla foto) non e' ancora ricollegata a
-// questa nuova griglia: la foto resta per ora solo un riferimento visivo
-// durante la trascrizione manuale. Verra' ricollegata quando la pipeline
-// (Fase 1/2, vedi note di progetto) sara' pronta e testata su foto reali.
+// Lettura automatica (riattivata): dopo aver scelto/scattato la foto, la
+// mandiamo a /api/extract-tally (Claude vision, lato server, stessa rotta
+// usata in produzione) che legge SOLO i conteggi S/P per ogni colonna di
+// giorno gia' compilata (la data la leggiamo comunque dalla griglia, non ci
+// fidiamo di quella restituita dal modello per il match: usiamo date_iso
+// solo per abbinare la riga giusta). Il risultato precompila i campi S/P
+// mostrati sotto come BOZZA MODIFICABILE: il tecnico la controlla e la
+// corregge prima di salvare, non viene mai scritta direttamente a database.
+// Le colonne segnalate "da controllare" (uncertain=true, o con una data che
+// non trova corrispondenza nel mese scelto) restano evidenziate.
 //
-// IMPORTANTE: la foto NON viene mai salvata su database o storage. Vive solo
-// in memoria nel browser (come riferimento durante la trascrizione) e viene
-// scartata appena si salvano i dati numerici. Questo evita di accumulare
-// spazio inutile e riduce al minimo i dati sensibili conservati (sui fogli
+// IMPORTANTE: la foto NON viene mai salvata su database o storage. Viene
+// inviata una sola volta all'endpoint per la lettura, resta in memoria nel
+// browser come riferimento, e viene scartata appena si salvano i dati
+// numerici. Questo riduce al minimo i dati sensibili conservati (sui fogli
 // cartacei puo' comparire scrittura a mano riconducibile a persone).
 const MAX_IMAGE_EDGE = 1568;
 const JPEG_QUALITY = 0.85;
@@ -45,6 +47,16 @@ type PhotoRow = {
   dayLabel: string;
   correct: string;
   prompted: string;
+  uncertain?: boolean;
+  autoFilled?: boolean;
+};
+
+type ExtractedRow = {
+  date_iso: string | null;
+  date_label: string;
+  correct_count: number;
+  prompted_count: number;
+  uncertain: boolean;
 };
 
 function buildRowsForMonth(monthValue: string): PhotoRow[] {
@@ -95,6 +107,17 @@ async function resizeImage(
   return { blob, mimeType };
 }
 
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buf = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 export default function PhotoImport({
   childId,
   therapistId,
@@ -122,6 +145,8 @@ export default function PhotoImport({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successCount, setSuccessCount] = useState<number | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractNotice, setExtractNotice] = useState<string | null>(null);
 
   const weekRows = useMemo(() => {
     const parsed = parseMonthValue(monthValue);
@@ -132,6 +157,7 @@ export default function PhotoImport({
   useEffect(() => {
     setRows(buildRowsForMonth(monthValue));
     setSuccessCount(null);
+    setExtractNotice(null);
   }, [monthValue]);
 
   useEffect(() => {
@@ -341,6 +367,7 @@ export default function PhotoImport({
     const file = e.target.files?.[0] ?? null;
     setSuccessCount(null);
     setError(null);
+    setExtractNotice(null);
 
     if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
     setPhotoBlob(null);
@@ -354,6 +381,7 @@ export default function PhotoImport({
       setPhotoBlob(blob);
       setPhotoMimeType(mimeType);
       setPhotoPreviewUrl(URL.createObjectURL(blob));
+      await runExtraction(blob, mimeType);
     } catch (err) {
       setError(
         err instanceof Error
@@ -363,9 +391,93 @@ export default function PhotoImport({
     }
   }
 
+  // Manda la foto a Claude vision (/api/extract-tally, stesso endpoint della
+  // produzione) e precompila SOLO i conteggi S/P delle colonne che il
+  // modello ha trovato compilate. La data che decide in quale riga della
+  // griglia finisce il risultato resta sempre quella calcolata qui (dalla
+  // posizione mese/giorno), non ci fidiamo di un eventuale errore di lettura
+  // della data per lo "smistamento": usiamo date_iso del modello solo per
+  // abbinare la colonna giusta tra quelle del mese selezionato.
+  async function runExtraction(blob: Blob, mimeType: string) {
+    setExtracting(true);
+    setExtractNotice(null);
+    try {
+      const imageBase64 = await blobToBase64(blob);
+      const res = await fetch("/api/extract-tally", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64, mimeType }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setExtractNotice(
+          data?.error
+            ? `Lettura automatica non riuscita: ${data.error} Puoi comunque compilare a mano.`
+            : "Lettura automatica non riuscita. Puoi comunque compilare a mano."
+        );
+        return;
+      }
+
+      const extractedRows = (data?.rows ?? []) as ExtractedRow[];
+      if (extractedRows.length === 0) {
+        setExtractNotice(
+          "Nessun segno trovato dalla lettura automatica (o foglio non riconosciuto). Controlla/compila a mano."
+        );
+        return;
+      }
+
+      let matched = 0;
+      let unmatched = 0;
+      setRows((prev) => {
+        const byDate = new Map(prev.map((r) => [r.date, { ...r }]));
+        for (const er of extractedRows) {
+          if (!er.date_iso || !byDate.has(er.date_iso)) {
+            unmatched += 1;
+            continue;
+          }
+          matched += 1;
+          byDate.set(er.date_iso, {
+            ...byDate.get(er.date_iso)!,
+            correct: String(er.correct_count ?? 0),
+            prompted: String(er.prompted_count ?? 0),
+            uncertain: Boolean(er.uncertain),
+            autoFilled: true,
+          });
+        }
+        return prev.map((r) => byDate.get(r.date) ?? r);
+      });
+
+      if (matched === 0) {
+        setExtractNotice(
+          "La lettura automatica ha trovato dei segni ma su date che non corrispondono al mese selezionato: controlla di aver scelto il mese giusto, oppure compila a mano."
+        );
+      } else {
+        setExtractNotice(
+          unmatched > 0
+            ? `${matched} giorni letti automaticamente (${unmatched} scartati perche' fuori dal mese selezionato). Controlla i valori evidenziati in giallo prima di salvare.`
+            : `${matched} giorni letti automaticamente. Controlla sempre i valori prima di salvare, specialmente quelli evidenziati in giallo.`
+        );
+      }
+    } catch {
+      setExtractNotice(
+        "Lettura automatica non disponibile al momento. Puoi comunque compilare a mano."
+      );
+    } finally {
+      setExtracting(false);
+    }
+  }
+
   function updateRow(key: string, patch: Partial<PhotoRow>) {
     setSuccessCount(null);
-    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+    // Una volta che il tecnico tocca a mano una cella, consideriamola
+    // rivista: toglie l'evidenziazione "da controllare" anche se era stata
+    // segnalata incerta dalla lettura automatica.
+    setRows((prev) =>
+      prev.map((r) =>
+        r.key === key ? { ...r, ...patch, uncertain: false } : r
+      )
+    );
   }
 
   async function handleSave() {
@@ -611,12 +723,34 @@ export default function PhotoImport({
             className="max-h-96 w-auto rounded-lg border border-line object-contain"
           />
         )}
+        {extracting && (
+          <p className="text-sm italic text-ink-soft">
+            Lettura automatica in corso…
+          </p>
+        )}
+        {!extracting && extractNotice && (
+          <p className="text-xs text-ink-soft">{extractNotice}</p>
+        )}
+        {!extracting && photoBlob && photoMimeType && (
+          <button
+            type="button"
+            onClick={() => runExtraction(photoBlob, photoMimeType)}
+            className="w-fit rounded-full border border-line bg-white px-3 py-1.5 text-xs font-medium text-ink-soft hover:border-mint-200"
+          >
+            Rileggi foto
+          </button>
+        )}
       </section>
 
       <section className="flex flex-col gap-3">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
           Conteggi per data
         </h2>
+        <p className="text-xs text-ink-faint">
+          I valori precompilati dalla lettura automatica sono sempre una
+          bozza: ricontrollali con la foto prima di salvare. Le celle gialle
+          sono quelle che la lettura automatica segnala come incerte.
+        </p>
 
         <div className="flex flex-col gap-2">
           {weekRows.map((week, wi) => (
@@ -635,15 +769,19 @@ export default function PhotoImport({
                 if (!row) return <div key={day.date} />;
                 const touched =
                   row.correct.trim() !== "" || row.prompted.trim() !== "";
+                const cellClass = row.uncertain
+                  ? "bg-amber-100 ring-1 ring-amber-400"
+                  : touched
+                    ? "bg-mint-100"
+                    : "bg-line/10";
                 return (
                   <div
                     key={day.date}
-                    className={`flex flex-col items-center gap-1 rounded-md p-1.5 ${
-                      touched ? "bg-mint-100" : "bg-line/10"
-                    }`}
+                    className={`flex flex-col items-center gap-1 rounded-md p-1.5 ${cellClass}`}
                   >
                     <span className="text-[10px] font-semibold text-ink-soft">
                       {day.dayName} {day.dayLabel}
+                      {row.uncertain ? " ⚠" : ""}
                     </span>
                     <label className="flex items-center gap-1 text-[10px] text-ink-soft">
                       S

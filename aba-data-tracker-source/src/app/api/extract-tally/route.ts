@@ -16,21 +16,23 @@ export const runtime = "nodejs";
 // in produzione ne' come alternativa di test.
 const ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
 
-const SYSTEM_PROMPT = `Sei un assistente che legge fogli cartacei di raccolta dati ABA (Applied Behavior Analysis) fotografati da un tecnico.
+const SYSTEM_PROMPT = `Sei un assistente che legge fogli cartacei mensili di raccolta dati ABA (Applied Behavior Analysis) fotografati da un tecnico.
 
 Il foglio ha questa struttura:
-- Un titolo in alto (obiettivo/item), da IGNORARE.
-- Un riferimento al periodo in alto a destra, da IGNORARE (spesso non aggiornato).
-- Una o piu' colonne, una per ogni data di sessione. Ogni colonna ha 3 righe: "S" (in alto), "P" (in mezzo), "%" (in basso, da IGNORARE sempre).
-- Le righe S e P contengono segni a mano: stanghette verticali raggruppate in blocchi da 5 (4 stanghette verticali + 1 barra orizzontale che le attraversa = quel gruppo vale 5). Un gruppo incompleto (es. 3 stanghette verticali senza barra) vale il numero di stanghette visibili.
+- Intestazione in alto (bambino/obiettivo/item/task), da IGNORARE.
+- 4 quadrati neri pieni agli angoli del foglio (marker di riferimento), da IGNORARE come contenuto.
+- 5 blocchi settimanali impilati, ciascuno con 6 colonne di giorno (Lun-Sab) con la DATA GIA' STAMPATA sopra ogni colonna (es. "Lun 05/10"). Alcune colonne, quelle di giorni fuori dal mese, hanno sfondo grigio: IGNORALE sempre, anche se contengono segni.
+- Ogni blocco ha 2 righe di dati sotto la data: "S" (risposte spontanee) e "P" (risposte promptate). Non esiste una riga "%".
+- IMPORTANTE - notazione dei conteggi: ogni stanghetta verticale ( | ) rappresenta UNA risposta. Per il numero 5 sono VALIDE entrambe le notazioni, anche miste nello stesso foglio: (a) 5 stanghette verticali singole una accanto all'altra, oppure (b) il tally tradizionale a 4 stanghette verticali + 1 barra orizzontale/diagonale che le attraversa tutte e 4 (quel gruppo vale 5). Riconosci entrambe le forme. Un gruppo di 4 stanghette SENZA barra vale 4, non 5. Un gruppo incompleto (es. 3 stanghette singole) vale il numero di stanghette visibili. Conta sempre il totale corretto di risposte in ciascuna cella, sommando eventuali piu' gruppi da 5 (in qualunque delle due notazioni) piu' i segni sciolti.
+- Una colonna (giorno) senza alcun segno in S e P significa che quel giorno NON c'e' stata sessione: NON e' uno zero, va semplicemente OMESSA dal risultato (non includerla tra le rows).
 
-Il tuo compito: per OGNI colonna/data visibile nella foto, conta con la massima precisione possibile il numero totale di segni nella riga S e nella riga P (somma di tutti i gruppi da 5 piu' eventuali segni sciolti), e leggi la data scritta a mano sopra o sotto la colonna.
+Il tuo compito: per OGNI colonna di giorno che appartiene al mese (sfondo bianco) E che ha almeno un segno in S o in P, conta con la massima precisione possibile il numero di stanghette nella riga S e nella riga P, e riporta la data esatta gia' stampata sopra quella colonna (non c'e' bisogno di leggere una data scritta a mano: usa quella stampata).
 
-Per la data: se riesci a dedurre con certezza giorno, mese e anno (l'anno puo' essere assente sul foglio ma dedotto dal contesto, es. altre date vicine o l'anno corrente), restituisci date_iso in formato YYYY-MM-DD. Se hai un dubbio ragionevole su qualsiasi parte della data, lascia date_iso a null e riporta comunque in date_label il testo esatto cosi' come scritto a mano.
+Per la data: restituisci sempre date_iso in formato YYYY-MM-DD, leggendo il numero del mese e il "Mese AAAA" scritto nel titolo del foglio (es. "Ottobre 2026") insieme al giorno stampato sopra la colonna. Se per qualche motivo il titolo con mese/anno non è leggibile, lascia date_iso a null e riporta in date_label il testo del giorno cosi' come stampato (es. "Lun 05/10").
 
-Segnala uncertain=true per qualsiasi colonna in cui i segni sono sbavati, sovrapposti, poco leggibili, o la data non e' chiara. E' MEGLIO segnalare incertezza che indovinare: chi userà questi dati li rivedra' sempre a mano prima di salvarli.
+Segnala uncertain=true per qualsiasi colonna in cui i segni sono sbavati, sovrapposti, poco leggibili, o ambigui nel conteggio. E' MEGLIO segnalare incertezza che indovinare: chi userà questi dati li rivedra' sempre a mano prima di salvarli.
 
-Rispondi SOLO usando lo strumento extract_tally_rows, con una voce per ogni colonna individuata, da sinistra a destra.`;
+Rispondi SOLO usando lo strumento extract_tally_rows, con una voce per ogni colonna di giorno compilata (con segni), da sinistra a destra, saltando le colonne vuote o fuori mese.`;
 
 const EXTRACTION_INSTRUCTION =
   "Leggi questo foglio cartaceo ed estrai i conteggi S/P per ogni colonna/data.";
@@ -158,7 +160,12 @@ async function extractWithAnthropic(
 }
 
 export async function POST(req: Request) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // ANTHROPIC_API_KEY2 e' il nome usato per la chiave dell'ambiente di
+  // test (vision-locale) quando ANTHROPIC_API_KEY e' gia' occupato su
+  // Vercel dalla chiave di produzione. Si legge prima la variabile
+  // "standard" e, se assente, quella alternativa: cosi' basta impostare
+  // UNA sola delle due per ambiente, senza doverle rinominare su Vercel.
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY2;
 
   if (!apiKey) {
     return Response.json(
